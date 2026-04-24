@@ -17,7 +17,7 @@ import logging
 from datetime import datetime
 from flask import Flask, request, Response
 from twilio.rest import Client as TwilioClient
-import google.generativeai as genai
+from google import genai
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -37,7 +37,7 @@ log = logging.getLogger("server")
 
 # ── Gemini Setup ───────────────────────────────────────────────────────────────
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-1.5-flash")   # free tier model
+gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))   # free tier model
 
 # ── Twilio Setup ───────────────────────────────────────────────────────────────
 twilio_client = TwilioClient(
@@ -204,4 +204,5 @@ if __name__ == "__main__":
     log.info("   Health : http://localhost:5000/health")
     log.info("   Webhook: http://localhost:5000/webhook")
     log.info("   Test   : POST http://localhost:5000/test")
-    app.run(debug=True, port=5000)
+    port = int(os.getenv("PORT", 8000))
+app.run(host="0.0.0.0", port=port, debug=False)
