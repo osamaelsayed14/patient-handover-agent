@@ -1,4 +1,4 @@
 flask
 twilio
-google-genai
+groq
 python-dotenv
