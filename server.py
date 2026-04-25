@@ -76,7 +76,7 @@ def process_handover(message: str, sender: str) -> dict:
     full_prompt = f"{SYSTEM_PROMPT}\n\nMessage:\n{message}"
 
     response = gemini_client.models.generate_content(
-        model="gemini-1.5-flash",
+        model="gemini-2.0-flash",
         contents=full_prompt
     )
 
