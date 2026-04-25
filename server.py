@@ -10,7 +10,7 @@ import json
 import logging
 from datetime import datetime
 from flask import Flask, request, Response
-from twilio.rest import Client as TwilioClient
+import requests
 from google import genai
 from dotenv import load_dotenv
 
@@ -33,12 +33,8 @@ log = logging.getLogger("server")
 gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 # ── Twilio Setup ───────────────────────────────────────────────────────────────
-twilio_client = TwilioClient(
-    os.getenv("TWILIO_ACCOUNT_SID"),
-    os.getenv("TWILIO_AUTH_TOKEN")
-)
-TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER")
-
+ULTRAMSG_INSTANCE = "instance171769"
+ULTRAMSG_TOKEN = "dpfekvfc3yf608yq"
 # ── System Prompt ──────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """
 You are a Patient Handover Agent in a clinical/healthcare setting.
@@ -135,10 +131,13 @@ _Logged & confirmed by Patient Handover Agent_""".strip()
 
 # ── Send WhatsApp Reply via Twilio ─────────────────────────────────────────────
 def send_reply(to: str, body: str):
-    twilio_client.messages.create(
-        from_=f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
-        to=f"whatsapp:{to}",
-        body=body
+    requests.post(
+        f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE}/messages/chat",
+        data={
+            "token": ULTRAMSG_TOKEN,
+            "to": to,
+            "body": body
+        }
     )
     log.info(f"REPLY SENT | to={to}")
 
