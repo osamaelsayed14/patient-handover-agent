@@ -1,6 +1,6 @@
 """
-Patient Handover Bot v5 - Clean (No Groq)
-OpenRouter + Telegram + Google Sheets
+Patient Handover Bot v6 - Gemini Direct
+No Groq. No OpenRouter. Gemini API only.
 """
 import os, json, logging, requests, tempfile, threading, base64, time
 from datetime import datetime
@@ -13,7 +13,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s",
     handlers=[logging.FileHandler("audit.log"), logging.StreamHandler()])
 log = logging.getLogger("bot")
 
-OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY", "")
+GEMINI_KEY     = os.environ.get("GEMINI_API_KEY", "")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 SHEET_ID       = "1Ys68GsrZpt8Sk-hgYXh8BKqJX-xAWedjLHG5MP1aCJ0"
@@ -22,71 +22,40 @@ sessions       = {}
 msg_buffer     = {}
 BUFFER_WAIT    = 8
 
-MODELS = [
-    "google/gemini-2.5-pro-exp-03-25:free",
-    "google/gemini-2.0-flash-exp:free",
-    "deepseek/deepseek-chat-v3-0324:free",
-    "deepseek/deepseek-r1:free",
-    "qwen/qwen-2.5-72b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
-]
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
 
-# ── OpenRouter ─────────────────────────────────────────────────────────────────
+# ── Gemini API ─────────────────────────────────────────────────────────────────
 def ai(system_prompt, user_msg, max_tok=2000):
-    last_error = None
-    for model in MODELS:
-        try:
-            resp = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"},
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user",   "content": user_msg}
-                    ],
-                    "max_tokens": max_tok,
-                    "temperature": 0.1
-                },
-                timeout=60
-            )
-            result = resp.json()
-            if "choices" not in result:
-                last_error = result.get("error", result)
-                continue
-            raw = result["choices"][0]["message"]["content"].strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"): raw = raw[4:]
-            return json.loads(raw.strip())
-        except Exception as e:
-            last_error = str(e)
-            continue
-    raise Exception(f"All models failed: {last_error}")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    body = {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"parts": [{"text": user_msg}]}],
+        "generationConfig": {"maxOutputTokens": max_tok, "temperature": 0.1}
+    }
+    resp = requests.post(url, json=body, timeout=60)
+    result = resp.json()
+    if "candidates" not in result:
+        raise Exception(f"Gemini error: {result}")
+    raw = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"): raw = raw[4:]
+    return json.loads(raw.strip())
 
 def ai_ocr(image_path):
     with open(image_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode()
-    for model in ["google/gemini-2.0-flash-exp:free", "google/gemini-2.5-pro-exp-03-25:free"]:
-        try:
-            resp = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"},
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                        {"type": "text", "text": "Extract ALL text from this medical image including all values, dates, units, findings. Be thorough."}
-                    ]}],
-                    "max_tokens": 1000
-                },
-                timeout=30
-            )
-            result = resp.json()
-            if "choices" in result:
-                return result["choices"][0]["message"]["content"]
-        except:
-            continue
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    body = {
+        "contents": [{"parts": [
+            {"inline_data": {"mime_type": "image/jpeg", "data": b64}},
+            {"text": "Extract ALL text from this medical image including all values, dates, units, findings. Be thorough."}
+        ]}]
+    }
+    resp = requests.post(url, json=body, timeout=30)
+    result = resp.json()
+    if "candidates" in result:
+        return result["candidates"][0]["content"]["parts"][0]["text"]
     return "Could not read image."
 
 # ── Google Sheets ──────────────────────────────────────────────────────────────
@@ -186,7 +155,7 @@ Auto-add emojis: ✴️ nursing tasks | ✳️ intern tasks | 🌟 deadlines | �
   "chief_complaint": "chief complaint",
   "vitals": "all vitals as string — add ⚠️ if critical",
   "examination": "full examination as formatted string",
-  "mse": "MSE findings as string — only if psychiatry",
+  "mse": "MSE findings as string — only if psychiatry content detected",
   "staff_plan": "staff rounding plan and justification",
   "new_labs": "new or changed results with dates — add ⚠️ if critical",
   "investigations": "all investigations with dates — keep last 2-3 for trending",
@@ -195,7 +164,7 @@ Auto-add emojis: ✴️ nursing tasks | ✳️ intern tasks | 🌟 deadlines | �
   "consultations": "other specialties consultations",
   "next_plan": "our team plan only",
   "medications": [{"name":"","dose":"","start_date":"","duration":"","next_change":""}],
-  "plex": "PLEX details as string — only if mentioned",
+  "plex": "PLEX details as string — only if PLEX is mentioned",
   "nursing_tasks": ["list with ✴️"],
   "intern_tasks": ["list with ✳️"],
   "deadlines": ["list with 🌟"],
@@ -206,7 +175,7 @@ RULES:
 - Name ONLY in Arabic. Everything else in English.
 - null for missing fields.
 - Add date to EVERY lab and investigation.
-- Any info not fitting schema goes in extra_fields.
+- Any info not fitting schema goes in extra_fields with smart title.
 - Return ONLY JSON."""
 
 WARD_PROMPT = """Extract ward round summary. Return ONLY valid JSON.
@@ -289,27 +258,31 @@ def dl(file_id):
     tmp.close()
     return tmp.name
 
-# ── Background processor ───────────────────────────────────────────────────────
+# ── Processor ──────────────────────────────────────────────────────────────────
 def process(chat_id, sender, text, voice=None, photo=None, doc=None):
     try:
         if text == "/start":
-            send(chat_id, "👋 *Patient Handover Bot*\n\n/new /show /list /open [name]\n\nSend text, 🎙️ voice, or 📷 photo"); return
+            send(chat_id, "👋 *Patient Handover Bot v6*\n\n/new /show /list /open [name]\n\nSend text, 🎙️ voice, or 📷 photo\n\n_Powered by Gemini_ 🧠")
+            return
         if text == "/list":
             pts = list_patients()
-            send(chat_id, "📋 *Patients:*\n\n" + ("\n".join([f"• *{p[0]}* | {p[1]}" for p in pts]) if pts else "None")); return
+            send(chat_id, "📋 *Patients:*\n\n" + ("\n".join([f"• *{p[0]}* | {p[1]}" for p in pts]) if pts else "No patients yet."))
+            return
         if text == "/show":
             name = sessions.get(chat_id)
             if name:
                 p = get_patient(name)
                 if p: send(chat_id, fmt(p))
-            else: send(chat_id, "No active patient.")
+            else: send(chat_id, "No active patient. Use /open [name]")
             return
         if text == "/new":
-            sessions.pop(chat_id, None); send(chat_id, "✅ Ready!"); return
+            sessions.pop(chat_id, None)
+            send(chat_id, "✅ Ready for new patient!")
+            return
         if text.startswith("/open "):
             name = text[6:].strip()
             p = get_patient(name)
-            if p: sessions[chat_id] = name; send(chat_id, f"✅ Opened: *{name}*")
+            if p: sessions[chat_id] = name; send(chat_id, f"✅ Opened: *{name}*\nSend more data to update.")
             else: send(chat_id, "❌ Not found. Use /list")
             return
 
@@ -336,7 +309,8 @@ def process(chat_id, sender, text, voice=None, photo=None, doc=None):
             if not d.get("name") and sessions.get(chat_id):
                 d["name"] = sessions[chat_id]
             if not d.get("name"):
-                send(chat_id, "⚠️ Name not found. Please include patient name."); return
+                send(chat_id, "⚠️ Name not found. Please include patient name.")
+                return
             sessions[chat_id] = d["name"]
             status  = save_patient(d, sender)
             patient = get_patient(d["name"])
@@ -357,7 +331,7 @@ def flush_buffer(chat_id, sender):
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 @app.route("/health")
-def health(): return {"status": "ok", "version": "v5-clean"}, 200
+def health(): return {"status": "ok", "version": "v6-gemini"}, 200
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -371,12 +345,10 @@ def webhook():
         photo   = msg.get("photo")
         doc     = msg.get("document")
 
-        # Commands and media — process immediately
         if text.startswith("/") or voice or photo or doc:
             threading.Thread(target=process, args=(chat_id, sender, text, voice, photo, doc)).start()
             return Response("OK", status=200)
 
-        # Text — buffer to combine split messages
         if text:
             if chat_id in msg_buffer:
                 existing = msg_buffer[chat_id].get("text", "")
@@ -397,5 +369,5 @@ def webhook():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    log.info(f"🚀 Handover Bot v5 Clean — port {port}")
+    log.info(f"🚀 Handover Bot v6 Gemini Direct — port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
