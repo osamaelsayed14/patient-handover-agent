@@ -20,32 +20,47 @@ TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 SHEET_ID       = "1Ys68GsrZpt8Sk-hgYXh8BKqJX-xAWedjLHG5MP1aCJ0"
 NOW            = lambda: datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 sessions       = {}
-MODEL          = "google/gemini-2.5-pro-exp-03-25:free"
+MODELS = [
+    "google/gemini-2.5-pro-exp-03-25:free",
+    "google/gemini-2.0-flash-exp:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+]
 
 # ── OpenRouter AI ──────────────────────────────────────────────────────────────
 def ai(system_prompt, user_msg, max_tok=2000):
-    resp = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {OPENROUTER_KEY}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "model": MODEL,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_msg}
-            ],
-            "max_tokens": max_tok,
-            "temperature": 0.1
-        },
-        timeout=60
-    )
-    raw = resp.json()["choices"][0]["message"]["content"].strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"): raw = raw[4:]
-    return json.loads(raw.strip())
+    last_error = None
+    for model in MODELS:
+        try:
+            resp = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": user_msg}
+                    ],
+                    "max_tokens": max_tok,
+                    "temperature": 0.1
+                },
+                timeout=60
+            )
+            result = resp.json()
+            if "choices" not in result:
+                last_error = result.get("error", result)
+                continue
+            raw = result["choices"][0]["message"]["content"].strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"): raw = raw[4:]
+            return json.loads(raw.strip())
+        except Exception as e:
+            last_error = str(e)
+            continue
+    raise Exception(f"All models failed. Last error: {last_error}")
 
 def ai_ocr(image_path):
     with open(image_path, "rb") as f:
@@ -301,14 +316,26 @@ def dl(file_id):
     return tmp.name
 
 def transcribe(path):
-    # Use OpenRouter Whisper via Groq as fallback
+    # Transcribe via OpenAI Whisper compatible API on OpenRouter
     try:
-        from groq import Groq
-        gc = Groq(api_key=os.getenv("GROQ_API_KEY",""))
+        import base64
         with open(path,"rb") as f:
-            return gc.audio.transcriptions.create(model="whisper-large-v3",file=f,language="ar").text
-    except:
-        return "Could not transcribe audio."
+            audio_b64 = base64.b64encode(f.read()).decode()
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "openai/whisper-large-v3",
+                "messages": [{"role":"user","content":[
+                    {"type":"input_audio","input_audio":{"data":audio_b64,"format":"mp3"}},
+                    {"type":"text","text":"Transcribe this audio accurately."}
+                ]}]
+            },
+            timeout=30
+        )
+        return resp.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"Could not transcribe audio: {str(e)[:50]}"
 
 # ── Background ─────────────────────────────────────────────────────────────────
 def bg(msg_data):
