@@ -13,7 +13,6 @@ Patient Handover Agent v4
 import os, json, logging, requests, tempfile
 from datetime import datetime
 from flask import Flask, request, Response
-from groq import Groq
 import gspread
 from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
