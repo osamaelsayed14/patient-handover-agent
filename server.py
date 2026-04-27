@@ -10,7 +10,7 @@ Patient Handover Agent v4
 - Neurology / Psychiatry / General
 """
 
-import os, json, logging, requests, tempfile
+import os, json, logging, requests, tempfile, base64
 from datetime import datetime
 from flask import Flask, request, Response
 
@@ -31,44 +31,66 @@ log = logging.getLogger("bot")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-SHEET_ID       = "1Ys68GsrZpt8Sk-hgYXh8BKqJX-xAWedjLHG5MP1aCJ0"
+OPENROUTER_API = "https://openrouter.ai/api/v1/chat/completions"
+SHEET_ID       = os.getenv("SHEET_ID", "1Ys68GsrZpt8Sk-hgYXh8BKqJX-xAWedjLHG5MP1aCJ0")
 TODAY          = lambda: datetime.utcnow().strftime("%Y-%m-%d")
 NOW            = lambda: datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
-# ── Google Sheets ──────────────────────────────────────────────────────────────
+# Validate required environment variables
+if not OPENROUTER_KEY:
+    log.error("OPENROUTER_KEY not set in environment")
+    raise ValueError("OPENROUTER_KEY environment variable is required")
+
+if not TELEGRAM_TOKEN:
+    log.error("TELEGRAM_TOKEN not set in environment")
+    raise ValueError("TELEGRAM_TOKEN environment variable is required")
+
+# ── Google Sheets ─────────────────────────────────────────────────────────────
 def get_sheet(name="Patients"):
-    creds_dict = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
-    creds = Credentials.from_service_account_info(creds_dict, scopes=[
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ])
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_key(SHEET_ID)
     try:
-        return sh.worksheet(name)
-    except:
-        ws = sh.add_worksheet(name, rows=1000, cols=30)
-        if name == "Patients":
-            ws.append_row([
-                "Name", "Age", "Specialty", "Diagnosis",
-                "Past Hx", "C/O", "Vitals", "Examination",
-                "Staff Plan + Justification", "New Labs", "Investigations",
-                "Pending Inv", "Inv To Be Done", "Consultations",
-                "Next Plan", "Medications", "PLEX", "MSE",
-                "Extra Fields", "History Log", "Last Updated", "Added By"
-            ])
-        elif name == "WardRounds":
-            ws.append_row([
-                "Date", "Ward", "Patients Summary",
-                "Key Updates", "Tasks", "Added By"
-            ])
-        return ws
+        creds_dict = json.loads(os.getenv("GOOGLE_CREDENTIALS", "{}"))
+        if not creds_dict:
+            log.error("GOOGLE_CREDENTIALS not set in environment")
+            raise ValueError("GOOGLE_CREDENTIALS environment variable is required")
+        
+        creds = Credentials.from_service_account_info(creds_dict, scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ])
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(SHEET_ID)
+        try:
+            return sh.worksheet(name)
+        except gspread.exceptions.WorksheetNotFound:
+            log.info(f"Creating new worksheet: {name}")
+            ws = sh.add_worksheet(name, rows=1000, cols=30)
+            if name == "Patients":
+                ws.append_row([
+                    "Name", "Age", "Specialty", "Diagnosis",
+                    "Past Hx", "C/O", "Vitals", "Examination",
+                    "Staff Plan + Justification", "New Labs", "Investigations",
+                    "Pending Inv", "Inv To Be Done", "Consultations",
+                    "Next Plan", "Medications", "PLEX", "MSE",
+                    "Extra Fields", "History Log", "Last Updated", "Added By"
+                ])
+            elif name == "WardRounds":
+                ws.append_row([
+                    "Date", "Ward", "Patients Summary",
+                    "Key Updates", "Tasks", "Added By"
+                ])
+            return ws
+    except Exception as e:
+        log.error(f"Error getting sheet: {e}")
+        raise
 
 
 def find_row(ws, value, col=1):
     try:
         return ws.find(value, in_column=col).row
-    except:
+    except gspread.exceptions.CellNotFound:
+        return None
+    except Exception as e:
+        log.error(f"Error finding row: {e}")
         return None
 
 
@@ -153,7 +175,7 @@ def list_patients():
     return [(r[0], r[2], r[3], r[20]) for r in rows if r and r[0]]
 
 
-# ── AI Prompts ─────────────────────────────────────────────────────────────────
+# ── AI Prompts ──────────────────────────────────────────────────────────────────
 DETECT_PROMPT = """
 Analyze this medical message and determine if it is:
 1. "individual" - a handover for a single specific patient
@@ -287,75 +309,162 @@ Return ONLY JSON.
 """
 
 
+def call_openrouter(messages: list, model: str = "openai/gpt-3.5-turbo", temperature: float = 0.1, max_tokens: int = 2000) -> str:
+    """
+    Call OpenRouter API and return the response text
+    """
+    try:
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_KEY}",
+            "HTTP-Referer": "https://github.com/osamaelsayed14/patient-handover-agent",
+            "X-Title": "Patient Handover Agent"
+        }
+        
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        }
+        
+        response = requests.post(OPENROUTER_API, json=payload, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        result = response.json()
+        if "error" in result:
+            log.error(f"OpenRouter error: {result['error']}")
+            raise Exception(f"OpenRouter API error: {result['error']}")
+        
+        return result["choices"][0]["message"]["content"]
+    except requests.exceptions.RequestException as e:
+        log.error(f"Request error calling OpenRouter: {e}")
+        raise
+    except (KeyError, IndexError) as e:
+        log.error(f"Error parsing OpenRouter response: {e}")
+        raise
+
+
 def detect_type(message: str) -> str:
-    resp = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": DETECT_PROMPT},
-            {"role": "user",   "content": message[:500]}
-        ],
-        temperature=0, max_tokens=10
-    )
-    result = resp.choices[0].message.content.strip().lower()
-    return "ward" if "ward" in result else "individual"
+    """
+    Detect if message is individual patient handover or ward round
+    """
+    try:
+        resp = call_openrouter(
+            messages=[
+                {"role": "system", "content": DETECT_PROMPT},
+                {"role": "user", "content": message[:500]}
+            ],
+            model="openai/gpt-3.5-turbo",
+            temperature=0,
+            max_tokens=10
+        )
+        result = resp.strip().lower()
+        return "ward" if "ward" in result else "individual"
+    except Exception as e:
+        log.error(f"Error detecting type: {e}")
+        raise
 
 
 def extract_individual(message: str) -> dict:
-    resp = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": INDIVIDUAL_PROMPT},
-            {"role": "user",   "content": message}
-        ],
-        temperature=0.1, max_tokens=2500
-    )
-    raw = resp.choices[0].message.content.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"): raw = raw[4:]
-    return json.loads(raw.strip())
+    """
+    Extract individual patient handover data
+    """
+    try:
+        resp = call_openrouter(
+            messages=[
+                {"role": "system", "content": INDIVIDUAL_PROMPT},
+                {"role": "user", "content": message}
+            ],
+            model="openai/gpt-3.5-turbo",
+            temperature=0.1,
+            max_tokens=2500
+        )
+        raw = resp.strip()
+        
+        # Remove markdown code blocks if present
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        
+        return json.loads(raw.strip())
+    except json.JSONDecodeError as e:
+        log.error(f"JSON decode error: {e}, raw response: {raw}")
+        raise ValueError(f"Failed to parse AI response as JSON: {e}")
+    except Exception as e:
+        log.error(f"Error extracting individual data: {e}")
+        raise
 
 
 def extract_ward(message: str) -> dict:
-    resp = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": WARD_PROMPT},
-            {"role": "user",   "content": message}
-        ],
-        temperature=0.1, max_tokens=2500
-    )
-    raw = resp.choices[0].message.content.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"): raw = raw[4:]
-    return json.loads(raw.strip())
+    """
+    Extract ward round summary data
+    """
+    try:
+        resp = call_openrouter(
+            messages=[
+                {"role": "system", "content": WARD_PROMPT},
+                {"role": "user", "content": message}
+            ],
+            model="openai/gpt-3.5-turbo",
+            temperature=0.1,
+            max_tokens=2500
+        )
+        raw = resp.strip()
+        
+        # Remove markdown code blocks if present
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        
+        return json.loads(raw.strip())
+    except json.JSONDecodeError as e:
+        log.error(f"JSON decode error: {e}, raw response: {raw}")
+        raise ValueError(f"Failed to parse AI response as JSON: {e}")
+    except Exception as e:
+        log.error(f"Error extracting ward data: {e}")
+        raise
 
 
 def transcribe_voice(file_path: str) -> str:
-    with open(file_path, "rb") as f:
-        resp = groq_client.audio.transcriptions.create(
-            model="whisper-large-v3", file=f, language="ar"
-        )
-    return resp.text
+    """
+    Transcribe audio file using OpenRouter's transcription capability
+    For now, return a placeholder. Full implementation would need audio API
+    """
+    log.warning("Voice transcription not fully implemented with OpenRouter")
+    return "Voice transcription feature coming soon"
 
 
 def ocr_image(file_path: str) -> str:
-    import base64
-    with open(file_path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode()
-    resp = groq_client.chat.completions.create(
-        model="llama-3.2-11b-vision-preview",
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                {"type": "text", "text": "Extract ALL text from this medical image. Include all values, dates, units, and findings. Be thorough and accurate."}
-            ]
-        }],
-        max_tokens=1000
-    )
-    return resp.choices[0].message.content
+    """
+    Extract text from medical image using OpenRouter vision model
+    """
+    try:
+        with open(file_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        
+        resp = call_openrouter(
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+                    },
+                    {
+                        "type": "text",
+                        "text": "Extract ALL text from this medical image. Include all values, dates, units, and findings. Be thorough and accurate."
+                    }
+                ]
+            }],
+            model="openai/gpt-4-vision",
+            max_tokens=1000
+        )
+        return resp
+    except Exception as e:
+        log.error(f"Error processing image: {e}")
+        raise
 
 
 # ── Format Individual Report ───────────────────────────────────────────────────
@@ -461,7 +570,7 @@ _Updated: {now}_
 🎯 *Next Plan (Our Plan):*
 {val(d.get('next_plan'))}
 
-━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━��━━━
 💊 *Medications:*
 {val(d.get('medications'))}
 {plex_section}
@@ -512,37 +621,58 @@ _Generated: {NOW()}_"""
 
 # ── Telegram ───────────────────────────────────────────────────────────────────
 def send(chat_id, text):
-    # Split long messages
-    if len(text) > 4000:
-        parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
-        for part in parts:
-            requests.post(f"{TELEGRAM_API}/sendMessage", json={
-                "chat_id": chat_id, "text": part, "parse_mode": "Markdown"
-            })
-    else:
-        requests.post(f"{TELEGRAM_API}/sendMessage", json={
-            "chat_id": chat_id, "text": text, "parse_mode": "Markdown"
-        })
+    """
+    Send message to Telegram, splitting long messages automatically
+    """
+    try:
+        # Split long messages
+        if len(text) > 4000:
+            parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
+            for part in parts:
+                response = requests.post(f"{TELEGRAM_API}/sendMessage", json={
+                    "chat_id": chat_id, "text": part, "parse_mode": "Markdown"
+                }, timeout=10)
+                if response.status_code != 200:
+                    log.error(f"Failed to send Telegram message: {response.text}")
+        else:
+            response = requests.post(f"{TELEGRAM_API}/sendMessage", json={
+                "chat_id": chat_id, "text": text, "parse_mode": "Markdown"
+            }, timeout=10)
+            if response.status_code != 200:
+                log.error(f"Failed to send Telegram message: {response.text}")
+    except Exception as e:
+        log.error(f"Error sending Telegram message: {e}")
 
 
 def download_file(file_id: str) -> str:
-    info = requests.get(f"{TELEGRAM_API}/getFile?file_id={file_id}").json()
-    path = info["result"]["file_path"]
-    url  = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{path}"
-    ext  = path.split(".")[-1] if "." in path else "ogg"
-    tmp  = tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}")
-    tmp.write(requests.get(url).content)
-    tmp.close()
-    return tmp.name
+    """
+    Download file from Telegram and save to temporary location
+    """
+    try:
+        info = requests.get(f"{TELEGRAM_API}/getFile?file_id={file_id}", timeout=10).json()
+        if "error" in info or "result" not in info:
+            raise Exception(f"Failed to get file info: {info}")
+        
+        path = info["result"]["file_path"]
+        url  = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{path}"
+        ext  = path.split(".")[-1] if "." in path else "ogg"
+        
+        tmp  = tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}")
+        tmp.write(requests.get(url, timeout=30).content)
+        tmp.close()
+        return tmp.name
+    except Exception as e:
+        log.error(f"Error downloading file: {e}")
+        raise
 
 
 sessions = {}  # chat_id -> patient_name
 
 
-# ── Webhook ────────────────────────────────────────────────────────────────────
+# ── Webhook ───────────────────────────────────────────────────────────────────
 @app.route("/health", methods=["GET"])
 def health():
-    return {"status": "ok", "agent": "HandoverBot/v4"}, 200
+    return {"status": "ok", "agent": "HandoverBot/v4", "version": "1.0.0"}, 200
 
 
 @app.route("/webhook", methods=["POST"])
@@ -558,7 +688,7 @@ def webhook():
         photo   = msg.get("photo")
         doc     = msg.get("document")
 
-        # ── Commands ──────────────────────────────────────────────────────────
+        # ── Commands ────────────────────────────────────────────────────────────
         if text.startswith("/start"):
             send(chat_id, """👋 *Patient Handover Bot v4*
 
@@ -570,7 +700,6 @@ def webhook():
 
 *Just send:*
 • Text handover → auto-detected (individual or ward)
-• 🎙️ Voice note → transcribed automatically
 • 📷 Photo (labs/CT) → OCR + extracted
 
 *Emoji Keys (auto-added):*
@@ -578,29 +707,35 @@ def webhook():
 ✳️ Intern task
 🌟 Upcoming deadline
 ⚠️ Critical alert
-📌 Morning round task
+���� Morning round task
 💥 Night shift task""")
             return Response("OK", status=200)
 
         if text.startswith("/list"):
-            patients = list_patients()
-            if not patients:
-                send(chat_id, "No patients found.")
-            else:
-                lines = "\n".join([f"• *{p[0]}* | {p[1]} | {p[2]} | {p[3]}" for p in patients])
-                send(chat_id, f"📋 *All Patients:*\n\n{lines}")
+            try:
+                patients = list_patients()
+                if not patients:
+                    send(chat_id, "No patients found.")
+                else:
+                    lines = "\n".join([f"• *{p[0]}* | {p[1]} | {p[2]} | {p[3]}" for p in patients])
+                    send(chat_id, f"📋 *All Patients:*\n\n{lines}")
+            except Exception as e:
+                send(chat_id, f"Error listing patients: {str(e)[:100]}")
             return Response("OK", status=200)
 
         if text.startswith("/show"):
-            name = sessions.get(chat_id)
-            if not name:
-                send(chat_id, "No active patient. Send data or use /open [name]")
-                return Response("OK", status=200)
-            patient = get_patient(name)
-            if patient:
-                send(chat_id, format_individual(patient))
-            else:
-                send(chat_id, "Patient not found.")
+            try:
+                name = sessions.get(chat_id)
+                if not name:
+                    send(chat_id, "No active patient. Send data or use /open [name]")
+                    return Response("OK", status=200)
+                patient = get_patient(name)
+                if patient:
+                    send(chat_id, format_individual(patient))
+                else:
+                    send(chat_id, "Patient not found.")
+            except Exception as e:
+                send(chat_id, f"Error showing patient: {str(e)[:100]}")
             return Response("OK", status=200)
 
         if text.startswith("/new"):
@@ -609,64 +744,72 @@ def webhook():
             return Response("OK", status=200)
 
         if text.startswith("/open"):
-            parts = text.split(" ", 1)
-            if len(parts) < 2:
-                send(chat_id, "Usage: /open [patient name]")
-                return Response("OK", status=200)
-            name = parts[1].strip()
-            patient = get_patient(name)
-            if patient:
-                sessions[chat_id] = name
-                send(chat_id, f"✅ Opened: *{name}*\nSend more data to update.")
-            else:
-                send(chat_id, f"❌ '{name}' not found. Use /list")
+            try:
+                parts = text.split(" ", 1)
+                if len(parts) < 2:
+                    send(chat_id, "Usage: /open [patient name]")
+                    return Response("OK", status=200)
+                name = parts[1].strip()
+                patient = get_patient(name)
+                if patient:
+                    sessions[chat_id] = name
+                    send(chat_id, f"✅ Opened: *{name}*\nSend more data to update.")
+                else:
+                    send(chat_id, f"❌ '{name}' not found. Use /list")
+            except Exception as e:
+                send(chat_id, f"Error opening patient: {str(e)[:100]}")
             return Response("OK", status=200)
 
-        # ── Voice ─────────────────────────────────────────────────────────────
-        if voice:
-            send(chat_id, "🎙️ Transcribing...")
-            file_path = download_file(voice["file_id"])
-            text = transcribe_voice(file_path)
-            send(chat_id, f"📝 Transcribed:\n_{text[:500]}_")
-
-        # ── Image OCR ─────────────────────────────────────────────────────────
-        elif photo or doc:
-            send(chat_id, "🔍 Reading image...")
-            file_id   = photo[-1]["file_id"] if photo else doc["file_id"]
-            file_path = download_file(file_id)
-            text = ocr_image(file_path)
-            send(chat_id, f"📄 Extracted:\n_{text[:400]}_")
+        # ── Image OCR ────────────────────────────────────────────────────────────
+        if photo or doc:
+            try:
+                send(chat_id, "🔍 Reading image...")
+                file_id   = photo[-1]["file_id"] if photo else doc.get("file_id")
+                if not file_id:
+                    send(chat_id, "Error: Could not extract file ID")
+                    return Response("OK", status=200)
+                    
+                file_path = download_file(file_id)
+                text = ocr_image(file_path)
+                send(chat_id, f"📄 Extracted:\n_{text[:400]}_")
+            except Exception as e:
+                send(chat_id, f"Error processing image: {str(e)[:100]}")
+                return Response("OK", status=200)
 
         if not text:
             return Response("OK", status=200)
 
-        # ── Detect type ───────────────────────────────────────────────────────
-        send(chat_id, "⏳ Processing...")
-        htype = detect_type(text)
+        # ── Detect type ───────────────────────────────────────────────────────────
+        try:
+            send(chat_id, "⏳ Processing...")
+            htype = detect_type(text)
 
-        if htype == "ward":
-            data_extracted = extract_ward(text)
-            report = format_ward(data_extracted)
-            send(chat_id, "🏥 *Ward Round Detected*")
-            send(chat_id, report)
+            if htype == "ward":
+                data_extracted = extract_ward(text)
+                report = format_ward(data_extracted)
+                send(chat_id, "🏥 *Ward Round Detected*")
+                send(chat_id, report)
 
-        else:
-            data_extracted = extract_individual(text)
+            else:
+                data_extracted = extract_individual(text)
 
-            if not data_extracted.get("name") and sessions.get(chat_id):
-                data_extracted["name"] = sessions[chat_id]
+                if not data_extracted.get("name") and sessions.get(chat_id):
+                    data_extracted["name"] = sessions[chat_id]
 
-            if not data_extracted.get("name"):
-                send(chat_id, "⚠️ Patient name not detected. Please include the name.")
-                return Response("OK", status=200)
+                if not data_extracted.get("name"):
+                    send(chat_id, "⚠️ Patient name not detected. Please include the name.")
+                    return Response("OK", status=200)
 
-            sessions[chat_id] = data_extracted["name"]
-            status  = save_patient(data_extracted, sender)
-            patient = get_patient(data_extracted["name"])
+                sessions[chat_id] = data_extracted["name"]
+                status  = save_patient(data_extracted, sender)
+                patient = get_patient(data_extracted["name"])
 
-            action = "✅ New patient created!" if status == "created" else "🔄 Patient updated!"
-            send(chat_id, action)
-            send(chat_id, format_individual(patient))
+                action = "✅ New patient created!" if status == "created" else "🔄 Patient updated!"
+                send(chat_id, action)
+                send(chat_id, format_individual(patient))
+        except Exception as e:
+            log.error(f"Error processing handover: {e}")
+            send(chat_id, f"⚠️ Error: {str(e)[:200]}")
 
     except Exception as e:
         log.error(f"ERROR | {e}")
