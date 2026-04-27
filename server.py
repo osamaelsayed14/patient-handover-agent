@@ -27,7 +27,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("bot")
 
-groq_client    = Groq(api_key=os.getenv("GROQ_API_KEY"))
+openai_client    = openai(api_key=os.getenv("OPENAI_API_KEY"))
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 SHEET_ID       = "1Ys68GsrZpt8Sk-hgYXh8BKqJX-xAWedjLHG5MP1aCJ0"
@@ -287,7 +287,7 @@ Return ONLY JSON.
 
 
 def detect_type(message: str) -> str:
-    resp = groq_client.chat.completions.create(
+    resp = openai_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
             {"role": "system", "content": DETECT_PROMPT},
@@ -300,7 +300,7 @@ def detect_type(message: str) -> str:
 
 
 def extract_individual(message: str) -> dict:
-    resp = groq_client.chat.completions.create(
+    resp = openai_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
             {"role": "system", "content": INDIVIDUAL_PROMPT},
@@ -316,7 +316,7 @@ def extract_individual(message: str) -> dict:
 
 
 def extract_ward(message: str) -> dict:
-    resp = groq_client.chat.completions.create(
+    resp = openai_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
             {"role": "system", "content": WARD_PROMPT},
