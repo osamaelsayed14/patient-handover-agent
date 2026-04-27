@@ -27,7 +27,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("bot")
 
-openai_client    = openai(api_key=os.getenv("OPENAI_API_KEY"))
+openrouter_client    = openrouter(api_key=os.getenv("OPENROUTER_API_KEY"))
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 SHEET_ID       = "1Ys68GsrZpt8Sk-hgYXh8BKqJX-xAWedjLHG5MP1aCJ0"
@@ -287,7 +287,7 @@ Return ONLY JSON.
 
 
 def detect_type(message: str) -> str:
-    resp = openai_client.chat.completions.create(
+    resp = openrouter_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
             {"role": "system", "content": DETECT_PROMPT},
@@ -300,7 +300,7 @@ def detect_type(message: str) -> str:
 
 
 def extract_individual(message: str) -> dict:
-    resp = openai_client.chat.completions.create(
+    resp = openrouter_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
             {"role": "system", "content": INDIVIDUAL_PROMPT},
@@ -316,7 +316,7 @@ def extract_individual(message: str) -> dict:
 
 
 def extract_ward(message: str) -> dict:
-    resp = openai_client.chat.completions.create(
+    resp = openrouter_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
             {"role": "system", "content": WARD_PROMPT},
@@ -333,7 +333,7 @@ def extract_ward(message: str) -> dict:
 
 def transcribe_voice(file_path: str) -> str:
     with open(file_path, "rb") as f:
-        resp = groq_client.audio.transcriptions.create(
+        resp = openrouter_client.audio.transcriptions.create(
             model="whisper-large-v3", file=f, language="ar"
         )
     return resp.text
@@ -343,7 +343,7 @@ def ocr_image(file_path: str) -> str:
     import base64
     with open(file_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode()
-    resp = groq_client.chat.completions.create(
+    resp = openrouter_client.chat.completions.create(
         model="llama-3.2-11b-vision-preview",
         messages=[{
             "role": "user",
