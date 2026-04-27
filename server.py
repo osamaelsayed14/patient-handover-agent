@@ -16,6 +16,7 @@ from flask import Flask, request, Response
 import gspread
 from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
+from openai import OpenAI
 
 load_dotenv()
 
@@ -27,14 +28,23 @@ logging.basicConfig(
 )
 log = logging.getLogger("bot")
 
-openrouter_client    = openrouter(api_key=os.getenv("OPENROUTER_API_KEY"))
+# Initialize OpenAI clients
+openrouter_client = OpenAI(
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+    base_url="https://openrouter.ai/api/v1"
+)
+
+openai_client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY")
+)
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 SHEET_ID       = "1Ys68GsrZpt8Sk-hgYXh8BKqJX-xAWedjLHG5MP1aCJ0"
 TODAY          = lambda: datetime.utcnow().strftime("%Y-%m-%d")
 NOW            = lambda: datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
-# ── Google Sheets ──────────────────────────────────────────────────────────────
+# ── Google Sheets ───────────────────────────────────────────────────────────
 def get_sheet(name="Patients"):
     creds_dict = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
     creds = Credentials.from_service_account_info(creds_dict, scopes=[
@@ -152,7 +162,7 @@ def list_patients():
     return [(r[0], r[2], r[3], r[20]) for r in rows if r and r[0]]
 
 
-# ── AI Prompts ─────────────────────────────────────────────────────────────────
+# ── AI Prompts ────────────────────────────────────────────────────────────
 DETECT_PROMPT = """
 Analyze this medical message and determine if it is:
 1. "individual" - a handover for a single specific patient
@@ -333,8 +343,8 @@ def extract_ward(message: str) -> dict:
 
 def transcribe_voice(file_path: str) -> str:
     with open(file_path, "rb") as f:
-        resp = openrouter_client.audio.transcriptions.create(
-            model="whisper-large-v3", file=f, language="ar"
+        resp = openai_client.audio.transcriptions.create(
+            model="whisper-1", file=f, language="ar"
         )
     return resp.text
 
@@ -509,7 +519,7 @@ def format_ward(d: dict) -> str:
 _Generated: {NOW()}_"""
 
 
-# ── Telegram ───────────────────────────────────────────────────────────────────
+# ── Telegram ───────────────────────────────────────────────────────────────
 def send(chat_id, text):
     # Split long messages
     if len(text) > 4000:
@@ -538,7 +548,7 @@ def download_file(file_id: str) -> str:
 sessions = {}  # chat_id -> patient_name
 
 
-# ── Webhook ────────────────────────────────────────────────────────────────────
+# ── Webhook ─────────────────────────────────────────────────────────────────
 @app.route("/health", methods=["GET"])
 def health():
     return {"status": "ok", "agent": "HandoverBot/v4"}, 200
@@ -621,14 +631,14 @@ def webhook():
                 send(chat_id, f"❌ '{name}' not found. Use /list")
             return Response("OK", status=200)
 
-        # ── Voice ─────────────────────────────────────────────────────────────
+        # ── Voice ───────────────────────────────────────────────────────────
         if voice:
             send(chat_id, "🎙️ Transcribing...")
             file_path = download_file(voice["file_id"])
             text = transcribe_voice(file_path)
             send(chat_id, f"📝 Transcribed:\n_{text[:500]}_")
 
-        # ── Image OCR ─────────────────────────────────────────────────────────
+        # ── Image OCR ────────────────────────────────────────────────────────
         elif photo or doc:
             send(chat_id, "🔍 Reading image...")
             file_id   = photo[-1]["file_id"] if photo else doc["file_id"]
