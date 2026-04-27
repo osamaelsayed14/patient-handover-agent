@@ -117,7 +117,7 @@ def save_patient(data: dict, sender: str):
         data.get("past_hx", ""),
         data.get("chief_complaint", ""),
         data.get("vitals", ""),
-        data.get("examination", ""),
+        json.dumps(data.get("examination") or {}, ensure_ascii=False), ""),
         data.get("staff_plan", ""),
         data.get("new_labs", ""),
         data.get("investigations", ""),
