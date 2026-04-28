@@ -22,11 +22,11 @@ sessions       = {}
 msg_buffer     = {}
 BUFFER_WAIT    = 8
 
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
 
 # ── Gemini API ─────────────────────────────────────────────────────────────────
 def ai(system_prompt, user_msg, max_tok=2000):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
     body = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"parts": [{"text": user_msg}]}],
@@ -45,7 +45,7 @@ def ai(system_prompt, user_msg, max_tok=2000):
 def ai_ocr(image_path):
     with open(image_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode()
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
     body = {
         "contents": [{"parts": [
             {"inline_data": {"mime_type": "image/jpeg", "data": b64}},
