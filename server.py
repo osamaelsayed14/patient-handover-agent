@@ -2,82 +2,125 @@
 Patient Handover Bot v6 - Gemini Direct
 No Groq. No OpenRouter. Gemini API only.
 """
-import os, json, logging, requests, tempfile, threading, base64, time
+import os, json, logging, requests, tempfile, sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from flask import Flask, request, Response
-import gspread
-from google.oauth2.service_account import Credentials
+
+# [Keep your existing imports for gspread, google.oauth2, etc.]
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s",
-    handlers=[logging.FileHandler("audit.log"), logging.StreamHandler()])
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
 log = logging.getLogger("bot")
 
-GEMINI_KEY     = os.environ.get("GEMINI_API_KEY", "")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-SHEET_ID       = "1Ys68GsrZpt8Sk-hgYXh8BKqJX-xAWedjLHG5MP1aCJ0"
-NOW            = lambda: datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-sessions       = {}
-msg_buffer     = {}
-BUFFER_WAIT    = 8
+# 1. ThreadPoolExecutor for Non-Blocking I/O
+# ده هيخلي الـ Webhook يرد على تليجرام فوراً بينما المعالجة بتحصل في الخلفية
+executor = ThreadPoolExecutor(max_workers=10) 
 
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
+# 2. SQLite for Stateless Sessions
+# بدل الـ sessions {} اللي بتتمسح مع كل ريستارت للسيرفر
+def init_db():
+    with sqlite3.connect("bot_state.db") as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS sessions (chat_id TEXT PRIMARY KEY, patient_name TEXT)")
+init_db()
 
-# ── Gemini API ─────────────────────────────────────────────────────────────────
-def ai(system_prompt, user_msg, max_tok=2000):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
-    body = {
-        "system_instruction": {"parts": [{"text": system_prompt}]},
-        "contents": [{"parts": [{"text": user_msg}]}],
-        "generationConfig": {"maxOutputTokens": max_tok, "temperature": 0.1}
-    }
-    resp = requests.post(url, json=body, timeout=60)
-    result = resp.json()
-    if "candidates" not in result:
-        raise Exception(f"Gemini error: {result}")
-    raw = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"): raw = raw[4:]
-    return json.loads(raw.strip())
+def get_session(chat_id):
+    with sqlite3.connect("bot_state.db") as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT patient_name FROM sessions WHERE chat_id=?", (str(chat_id),))
+        res = cur.fetchone()
+        return res[0] if res else None
 
-def ai_ocr(image_path):
-    with open(image_path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode()
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
-    body = {
-        "contents": [{"parts": [
-            {"inline_data": {"mime_type": "image/jpeg", "data": b64}},
-            {"text": "Extract ALL text from this medical image including all values, dates, units, findings. Be thorough."}
-        ]}]
-    }
-    resp = requests.post(url, json=body, timeout=30)
-    result = resp.json()
-    if "candidates" in result:
-        return result["candidates"][0]["content"]["parts"][0]["text"]
-    return "Could not read image."
+def set_session(chat_id, patient_name):
+    with sqlite3.connect("bot_state.db") as conn:
+        conn.execute("REPLACE INTO sessions (chat_id, patient_name) VALUES (?, ?)", (str(chat_id), patient_name))
 
-# ── Google Sheets ──────────────────────────────────────────────────────────────
-def get_sheet(name="Patients"):
-    creds_dict = json.loads(os.environ.get("GOOGLE_CREDENTIALS", "{}"))
-    creds = Credentials.from_service_account_info(creds_dict, scopes=[
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"])
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_key(SHEET_ID)
+def clear_session(chat_id):
+    with sqlite3.connect("bot_state.db") as conn:
+        conn.execute("DELETE FROM sessions WHERE chat_id=?", (str(chat_id),))
+
+# [Keep your existing AI, Google Sheets, Prompts, and Format Functions Here]
+# ... 
+
+# ── Processor (Now runs in a background thread) ────────────────────────────────
+def process_message_async(chat_id, sender, text, voice=None, photo=None, doc=None):
     try:
-        return sh.worksheet(name)
-    except:
-        ws = sh.add_worksheet(name, rows=1000, cols=25)
-        ws.append_row(["Name","Age","Specialty","Diagnosis","Past Hx","C/O",
-            "Vitals","Examination","Staff Plan","New Labs","Investigations",
-            "Pending Inv","Inv To Do","Consultations","Next Plan","Medications",
-            "PLEX","MSE","Extra","History","Last Updated","Added By"])
-        return ws
+        if text == "/start":
+            send(chat_id, "👋 *Patient Handover Bot v6 (Refactored)*\n\n/new /show /list /open [name]")
+            return
+        
+        if text == "/new":
+            clear_session(chat_id)
+            send(chat_id, "✅ Ready for new patient!")
+            return
 
-def find_row(ws, name):
-    try: return ws.find(name, in_column=1).row
+        if text.startswith("/open "):
+            name = text[6:].strip()
+            p = get_patient(name)
+            if p:
+                set_session(chat_id, name)
+                send(chat_id, f"✅ Opened: *{name}*\nSend more data to update.")
+            else:
+                send(chat_id, "❌ Not found. Use /list")
+            return
+
+        # [Keep your Voice/Photo handling logic here]
+        # ...
+
+        # Processing Text with Gemini
+        d = ai(IND_PROMPT, text, 2000)
+        
+        current_patient = get_session(chat_id)
+        
+        if not d.get("name") and current_patient:
+            d["name"] = current_patient
+            
+        if not d.get("name"):
+            send(chat_id, "⚠️ Name not found. Please include patient name.")
+            return
+            
+        set_session(chat_id, d["name"])
+        status = save_patient(d, sender)
+        patient = get_patient(d["name"])
+        send(chat_id, "✅ New patient!" if status == "created" else "🔄 Updated!")
+        send(chat_id, fmt(patient))
+
+    except Exception as e:
+        log.error(f"ERROR | {e}")
+        send(chat_id, f"⚠️ Error: {str(e)[:150]}")
+
+# ── Routes ─────────────────────────────────────────────────────────────────────
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.json
+    try:
+        msg = data.get("message", {})
+        if not msg:
+            return Response("OK", status=200)
+
+        chat_id = str(msg["chat"]["id"])
+        sender = msg["from"].get("username", chat_id)
+        text = msg.get("text", "").strip()
+        voice = msg.get("voice") or msg.get("audio")
+        photo = msg.get("photo")
+        doc = msg.get("document")
+
+        # Offload all processing to the ThreadPoolExecutor
+        # السيرفر هيرجع 200 OK فوراً لتليجرام عشان يمنع الـ Retry Loops
+        if text or voice or photo or doc:
+            executor.submit(process_message_async, chat_id, sender, text, voice, photo, doc)
+
+        return Response("OK", status=200)
+
+    except Exception as e:
+        log.error(f"WEBHOOK ERROR | {e}")
+        return Response("OK", status=200)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    log.info(f"🚀 Handover Bot v6 Refactored — port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
+
     except: return None
 
 def to_str(v):
